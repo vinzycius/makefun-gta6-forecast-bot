@@ -30,9 +30,10 @@ final case's 42 launches, practice launches included):
 Practice validation (local pinball harness, log scale, 5 quantiles, hours
 2..24; answers fetched once from SullyGnome, the cases' own source):
   house baseline:  p00 0.7437  p01 0.2868  p02 0.2146  p03 0.3033  mean 0.3871
-  this model:      p00 0.1128  p01 0.1239  p02 0.1077  p03 0.2086  mean 0.1383
-  (leave-one-out: each practice case scored with the other three practice
-  launches included in the fit, as the final case includes them.)
+  this model:      p00 0.1158  p01 0.1207  p02 0.1092  p03 0.2113  mean 0.1393
+  (64% better than the baseline on the mean; leave-one-out mean 0.1383,
+  each practice case scored with the other three practice launches
+  included in the fit, as the final case includes them.)
 
 How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0) in
 python:3.13-slim, standard library only: no network, no pip packages. -P
