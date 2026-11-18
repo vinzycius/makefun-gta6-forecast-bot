@@ -19,10 +19,15 @@ final case's 42 launches, practice launches included):
      sits near hour 1, it does not collapse), while the absolute forecast
      still scales with the true hour-1 print. Ratios are clamped to
      [0.60, 15].
-  4. Spread: q_tau = median * exp(z_tau * 0.10 * sqrt(min(h-1, 9))),
-     z = [-1.645, -0.674, 0, 0.674, 1.645]. The 0.10 spread (capped growth)
-     was tuned on the four practice cases; it is narrower than the house
-     baseline's 0.15 because the shape already carries most of the signal.
+  4. Spread (per hour, from the data): q_tau = median * exp(z_tau * s_h),
+     z = [-1.645, -0.674, 0, 0.674, 1.645], where s_h = 0.30 * (the
+     residual std of log(ratio_h) across the comparables at hour h). The
+     early hours scatter far more than the evening (unlock waves), so a
+     single global spread is wrong: the house baseline's 0.15 growing with
+     sqrt(h-1) is far too narrow at hours 3-6 and too wide later. The 0.30
+     scale is tuned on the four practice cases (0.25-0.35 all similar);
+     the raw residual std overstates the error for big launches, so it is
+     scaled down.
   5. Fallback: if the comparables cannot be used at all (missing, too few,
      or any error), the program falls back to the house persistence baseline,
      so it always writes a valid forecast.
@@ -30,8 +35,8 @@ final case's 42 launches, practice launches included):
 Practice validation (local pinball harness, log scale, 5 quantiles, hours
 2..24; answers fetched once from SullyGnome, the cases' own source):
   house baseline:  p00 0.7437  p01 0.2868  p02 0.2146  p03 0.3033  mean 0.3871
-  this model:      p00 0.1158  p01 0.1207  p02 0.1092  p03 0.2113  mean 0.1393
-  (64% better than the baseline on the mean; leave-one-out mean 0.1383,
+  this model:      p00 0.1143  p01 0.1164  p02 0.1107  p03 0.1967  mean 0.1345
+  (65% better than the baseline on the mean; leave-one-out mean 0.1335,
   each practice case scored with the other three practice launches
   included in the fit, as the final case includes them.)
 
@@ -66,8 +71,14 @@ Z = [-1.645, -0.674, 0, 0.674, 1.645]
 P1_FLOOR = 1000.0        # comparables with hour-1 below this are ignored
 P1_CAP = 400000.0        # effective hour-1 for the shape is capped here
 BLEND_W = 0.8            # weight of the p1-adaptive shape (rest: median shape)
-SIGMA = 0.10             # log-spread per sqrt-hour, capped at sqrt(9)
+SIGMA = 0.10             # fallback log-spread per sqrt-hour (used only when
+                         # an hour has too few residuals to estimate its own)
 SPREAD_CAP_H = 9         # sqrt(h-1) is capped at sqrt(SPREAD_CAP_H)
+RESID_SCALE = 0.3        # per-hour spread = RESID_SCALE * residual std of
+                         # log(ratio) at that hour across the comparables.
+                         # The residual std (~0.7-1.1) overstates the error
+                         # for big launches, so it is scaled down; 0.3 is
+                         # the tuned value (0.25-0.35 all similar).
 RATIO_LO = 0.60
 RATIO_HI = 15.0
 BASELINE_SIGMA = 0.15    # fallback persistence baseline spread
@@ -134,9 +145,13 @@ def usable_curves(case: dict):
 
 def fit_shape(curves):
     """Per-hour least-squares fit of log(ratio_h) on log(p1).
-    Returns ({h: (a, b)}, {h: median_ratio})."""
+    Returns ({h: (a, b)}, {h: median_ratio}, {h: residual_std}).
+    The residual std measures how much the comparables' shapes scatter
+    around the fit at each hour: early hours scatter far more (unlock
+    waves) than evening hours, so the forecast spread is per-hour."""
     params = {}
     medians = {}
+    resid_sd = {}
     for h in range(2, 25):
         xs, ys = [], []
         ratios = []
@@ -150,13 +165,18 @@ def fit_shape(curves):
         n = len(xs)
         if n < 5:
             params[h] = (0.0, 0.0)
+            resid_sd[h] = None
             continue
         mx = sum(xs) / n
         my = sum(ys) / n
         den = sum((x - mx) ** 2 for x in xs)
         b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
-        params[h] = (my - b * mx, b)
-    return params, medians
+        a = my - b * mx
+        params[h] = (a, b)
+        resid = [y - (a + b * x) for x, y in zip(xs, ys)]
+        mean = sum(resid) / n
+        resid_sd[h] = math.sqrt(sum((r - mean) ** 2 for r in resid) / n)
+    return params, medians, resid_sd
 
 
 def shape_for(p1: float, params, medians) -> dict:
@@ -188,11 +208,18 @@ def baseline_forecast(p1: float, hours):
     return out
 
 
-def model_forecast(p1: float, shape: dict, hours):
+def model_forecast(p1: float, shape: dict, resid_sd: dict, hours):
     out = {}
     for h in hours:
         med = max(1.0, float(p1) * shape[h])
-        s = SIGMA * math.sqrt(min(h - 1, SPREAD_CAP_H))
+        # Per-hour spread from the comparables' residual scatter at that
+        # hour (scaled down: big launches are steadier than the pool).
+        # Falls back to the old global spread if the hour has no estimate.
+        sd = resid_sd.get(h)
+        if sd is None:
+            s = SIGMA * math.sqrt(min(h - 1, SPREAD_CAP_H))
+        else:
+            s = RESID_SCALE * sd
         out[h] = [med * math.exp(z * s) for z in Z]
     return out
 
@@ -210,9 +237,9 @@ def forecast_case(case: dict, name: str) -> dict:
         curves = usable_curves(case)
         if len(curves) < 5:
             raise ValueError("too few usable comparables")
-        params, medians = fit_shape(curves)
+        params, medians, resid_sd = fit_shape(curves)
         shape = shape_for(p1, params, medians)
-        quantiles = model_forecast(p1, shape, hours)
+        quantiles = model_forecast(p1, shape, resid_sd, hours)
     except Exception:
         # Never fail a case: fall back to the house baseline.
         quantiles = baseline_forecast(p1, hours)
