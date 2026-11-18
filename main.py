@@ -160,7 +160,10 @@ def fit_shape(curves):
 
 
 def shape_for(p1: float, params, medians) -> dict:
-    """Blended ratio-to-hour-1 shape for this case's hour-1 print."""
+    """Blended ratio-to-hour-1 shape for this case's hour-1 print.
+    The effective hour-1 is capped at P1_CAP: for a launch far bigger than
+    any comparable, the shape stays the biggest launches' shape (evening
+    near hour 1) instead of collapsing toward a flat line."""
     lp = math.log(min(max(1.0, p1), P1_CAP))
     shape = {}
     for h in range(2, 25):
